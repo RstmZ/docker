@@ -1,56 +1,64 @@
 import express, { Express, Request, Response } from 'express';
-import system from 'system-commands';
-import _, { pick } from 'lodash';
-import { promisify } from 'util';
-const exec = promisify(require('child_process').exec);
+import _ from 'lodash';
+import axios from 'axios'; 
 
 const app: Express = express();
 
 app.use(express.json());
 
-async function isExist(name: string) {
-    try {
-        return await system(`docker inspect ${name}`);
-    } catch (error) {
-        if (error === `Error: No such object: ${name}`) { 
-            await system(`docker pull ${name}`);
-            return await system(`docker inspect ${name}`);
-        }
-        throw new Error(error as string);
+async function getToken(name: string) {
+  try {
+    const response = await axios.get(`https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/${name}:pull`);
+
+    return response.data.token;
+  } catch (error) {
+    throw new Error(error as string);
+  }
+}
+
+async function getDockerfile(name: string, token: string) {
+  const manifestUrl = `https://registry-1.docker.io/v2/library/${name}/manifests/latest`;
+
+  const manifestResponse = await axios.get(manifestUrl, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
     }
+  });
+
+  const { fsLayers, history } = manifestResponse.data;
+
+  const layers = []
+
+  for (let index = 0; index < fsLayers.length; index++) {
+    const element = fsLayers[index];
+    layers.push(element.blobSum)
+  }
+  const commands = []
+  for (let index = 0; index < history.length; index++) {
+    const element = JSON.parse(history[index].v1Compatibility);
+
+    const cmd = element.container_config.Cmd;
+    commands.push(cmd)
+  }
+
+  return _.zip(layers, commands);
 }
 
 app.post('/', async (req: Request, res: Response) => {
-    try {
-        const name = req.body.name;
+  try {
+    const name = req.body.name;
 
-        const output = await isExist(name);
+    const token = await getToken(name);
+ 
+    const layers = await getDockerfile(name, token);
 
-        if (output.length == 0) {
-            res.status(404).send('error')
-        }
-
-        const result = JSON.parse(output)[0]
-
-        const answer = pick(result, 'Id', 'RootFS');
-        const imageId = answer.Id;
-        const command1 = `docker pull chenzj/dfimage`;
-        const command2 = `docker run -v /var/run/docker.sock:/var/run/docker.sock --rm chenzj/dfimage ${imageId}`;
-
-        await exec(command1);
-       
-        const { stdout } = await exec(command2);
-        const [parent, ...arr] = stdout.split(/\n(?=RUN |CMD |ENTRYPOINT|ADD|WORKDIR )/);
-    
-        const layers = _.zip(answer.RootFS.Layers, arr);
-
-        res.json({
-            parent,
-            layers
-        });
-    } catch (error) { 
-        res.status(404).send({ error })
-    }
+    res.json({
+      parent: '',
+      layers
+    });
+  } catch (error) {
+    res.status(404).send({ error })
+  }
 });
 
 export default app;
